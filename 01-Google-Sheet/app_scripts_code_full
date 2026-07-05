@@ -1,0 +1,265 @@
+function normalizeEvent(event) {
+  event = event || "";
+
+  // Android Automate 可能传来：language: en, text: pee
+  if (event.includes("text:")) {
+    event = event.split("text:").pop().trim();
+  }
+
+  return event;
+}
+
+function getLatestEvent(event) {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName("Sheet1");
+
+  event = normalizeEvent(event);
+
+  const lastRow = sheet.getLastRow();
+
+  for (let row = lastRow; row >= 2; row--) {
+    const time = sheet.getRange(row, 1).getValue();
+    const pastEvent = sheet.getRange(row, 2).getValue();
+    const amount = sheet.getRange(row, 3).getValue();
+    const status = sheet.getRange(row, 4).getValue();
+
+    if (
+      pastEvent === event &&
+      status !== "Cancelled"
+    ) {
+      return {
+        time: new Date(time).toISOString(),
+        amount: amount || ""
+      };
+    }
+  }
+
+  return {
+    time: "",
+    amount: ""
+  };
+}
+
+function recordEvent(event, amount, action) {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName("Sheet1");
+
+  event = normalizeEvent(event);
+  amount = amount || "";
+  action = action || "";
+
+  // 如果 NFC 文本直接写 undo，也当作撤销
+  if (event === "undo") {
+    action = "undo";
+  }
+
+  // 撤销：把最后一条 Active 记录改成 Cancelled
+  if (action === "undo") {
+    const lastRow = sheet.getLastRow();
+
+    for (let row = lastRow; row >= 2; row--) {
+      const status = sheet.getRange(row, 4).getValue();
+
+      if (status === "Active" || status === "") {
+        sheet.getRange(row, 4).setValue("Cancelled");
+        break;
+      }
+    }
+
+    return "UNDO OK";
+  }
+
+  const now = new Date();
+  let duration = "";
+
+  // 睡醒：往上找最近一次有效、还没有配对的 sleep_start
+  if (event === "sleep_end" || event === "睡醒") {
+    const lastRow = sheet.getLastRow();
+
+    for (let row = lastRow; row >= 2; row--) {
+      const pastTime = sheet.getRange(row, 1).getValue();
+      const pastEvent = sheet.getRange(row, 2).getValue();
+      const pastStatus = sheet.getRange(row, 4).getValue();
+      const pastSleepEnd = sheet.getRange(row, 5).getValue();
+
+      if (
+        (pastEvent === "sleep_start" || pastEvent === "入睡") &&
+        pastStatus !== "Cancelled" &&
+        pastSleepEnd === ""
+      ) {
+        const diffMs = now - new Date(pastTime);
+        const diffMinutes = Math.round(diffMs / 1000 / 60);
+
+        const hours = Math.floor(diffMinutes / 60);
+        const minutes = diffMinutes % 60;
+
+        duration = hours + "h " + minutes + "m";
+
+        sheet.getRange(row, 5).setValue(now);
+        sheet.getRange(row, 6).setValue(duration);
+
+        break;
+      }
+    }
+  }
+
+  sheet.appendRow([
+    now,
+    event,
+    amount,
+    "Active",
+    "",
+    duration
+  ]);
+
+  return "OK";
+}
+
+// iPhone Shortcuts 用 POST
+function doPost(e) {
+  const data = JSON.parse(e.postData.contents || "{}");
+
+  const result = recordEvent(
+    data.event || "",
+    data.amount || "",
+    data.action || ""
+  );
+
+  return ContentService
+    .createTextOutput(result)
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+// Android Automate / Home Assistant 用 GET
+function doGet(e) {
+  if (e.parameter.summary) {
+  const result = getSummary();
+
+  return ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+  if (e.parameter.currentSleep) {
+  const result = getCurrentSleep();
+
+  return ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+  }
+  // Home Assistant 读取最新一条记录
+  if (e.parameter.latest) {
+    const latest = getLatestEvent(e.parameter.latest);
+
+    return ContentService
+      .createTextOutput(JSON.stringify(latest))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // NFC 正常记录
+  const result = recordEvent(
+    e.parameter.event || "",
+    e.parameter.amount || "",
+    e.parameter.action || ""
+  );
+
+  return ContentService
+    .createTextOutput(result)
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+function getCurrentSleep() {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName("Sheet1");
+
+  const lastRow = sheet.getLastRow();
+
+  for (let row = lastRow; row >= 2; row--) {
+    const time = sheet.getRange(row, 1).getValue();
+    const event = sheet.getRange(row, 2).getValue();
+    const status = sheet.getRange(row, 4).getValue();
+    const sleepEnd = sheet.getRange(row, 5).getValue();
+
+    if (
+      event === "sleep_start" &&
+      status !== "Cancelled" &&
+      sleepEnd === ""
+    ) {
+      const now = new Date();
+      const diffMs = now - new Date(time);
+      const diffMinutes = Math.floor(diffMs / 1000 / 60);
+
+      const hours = Math.floor(diffMinutes / 60);
+      const minutes = diffMinutes % 60;
+
+      return {
+        sleeping: true,
+        text: hours > 0 ? hours + "h" + minutes + "m" : minutes + "m"
+      };
+    }
+
+    if (event === "sleep_end") {
+      break;
+    }
+  }
+
+  return {
+    sleeping: false,
+    text: "awake"
+  };
+}
+function getSummary() {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName("Sheet1");
+
+  const lastRow = sheet.getLastRow();
+
+  let lastFeedTime = "";
+  let lastFeedAmount = "";
+  let currentSleep = getCurrentSleep();
+
+  for (let row = lastRow; row >= 2; row--) {
+    const time = sheet.getRange(row, 1).getValue();
+    const event = normalizeEvent(sheet.getRange(row, 2).getValue());
+    const amount = sheet.getRange(row, 3).getValue();
+    const status = sheet.getRange(row, 4).getValue();
+
+    if (
+      (event === "feed" || event === "bottle" || event === "喂奶") &&
+      status !== "Cancelled"
+    ) {
+      lastFeedTime = new Date(time);
+      lastFeedAmount = amount || "";
+      break;
+    }
+  }
+
+  const now = new Date();
+
+  return {
+    sleep: currentSleep.text,
+    sleeping: currentSleep.sleeping,
+    feed_amount: lastFeedAmount,
+    feed_ago: lastFeedTime ? formatDuration(now - lastFeedTime) : "",
+    updated: Utilities.formatDate(
+      now,
+      Session.getScriptTimeZone(),
+      "HH:mm"
+    )
+  };
+}
+
+function formatDuration(ms) {
+  const totalMinutes = Math.floor(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return hours + "h" + minutes + "m";
+  }
+
+  return minutes + "m";
+}
