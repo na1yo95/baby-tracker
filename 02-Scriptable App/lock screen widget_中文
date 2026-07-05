@@ -1,0 +1,31 @@
+// Variables used by Scriptable.
+// These must be at the very top of the file. Do not edit.
+// icon-color: deep-blue; icon-glyph: magic;
+const url = "你的google sheet url"?summary=1"
+
+
+const req = new Request(url)
+const data = await req.loadJSON()
+
+const widget = new ListWidget()
+widget.setPadding(16,16,16,16)
+
+let title = widget.addText("Nomi" + "•"+ data.updated)
+
+title.font = Font.boldSystemFont(16)
+
+
+let sleep = widget.addText("😴睡了" +data.sleep)
+sleep.font = Font.systemFont(16)
+
+let feed = widget.addText("🍼喝了" + data.feed_amount + " ml ")
+feed.font = Font.systemFont(16)
+
+
+if (config.runsInWidget) {
+  Script.setWidget(widget)
+} else {
+  await widget.presentMedium()
+}
+
+Script.complete()
